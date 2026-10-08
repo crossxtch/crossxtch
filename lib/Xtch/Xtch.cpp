@@ -137,6 +137,7 @@ void XtchBook::close() {
   chapters.clear();
   chaptersAvailable = false;
   chaptersLoaded = false;
+  chaptersBroken = false;
 }
 
 bool XtchBook::ensureOpen() {
@@ -180,10 +181,10 @@ xtch::Error XtchBook::open(const char* path) {
     snprintf(bookTitle, sizeof(bookTitle), "%s", name);
   }
 
-  if (!loadPageTable()) {
+  error = loadPageTable();
+  if (error != xtch::Error::Ok) {
     closeFile();
-    LOG_ERR("XTCH", "Page table unreadable");
-    error = xtch::Error::CorruptedHeader;
+    LOG_ERR("XTCH", "Page table: %s", xtch::errorName(error));
     return error;
   }
 
@@ -246,28 +247,30 @@ xtch::Error XtchBook::readMetadata() {
   return xtch::Error::Ok;
 }
 
-bool XtchBook::loadPageTable() {
+xtch::Error XtchBook::loadPageTable() {
   pageTableWindowStart = 0;
   pageTableWindowCount = 0;
   clusterLruCount = 0;
   if (header.pageCount == 0 || header.pageTableOffset == 0) {
-    return false;
+    LOG_ERR("XTCH", "Page table missing (count=%u offset=%llu)", header.pageCount,
+            static_cast<unsigned long long>(header.pageTableOffset));
+    return xtch::Error::CorruptedHeader;
   }
 
   // First row only: default pixel size. The window is left empty so the first
   // real lookup (often a resumed page, not 0) recenters around that page.
   if (!file.seek64(header.pageTableOffset)) {
     LOG_ERR("XTCH", "Page table seek failed");
-    return false;
+    return xtch::Error::ReadError;
   }
   xtch::PageTableEntry first{};
   if (static_cast<size_t>(file.read(reinterpret_cast<uint8_t*>(&first), sizeof(first))) != sizeof(first)) {
     LOG_ERR("XTCH", "First page table entry unreadable");
-    return false;
+    return xtch::Error::ReadError;
   }
   defaultWidth = first.width;
   defaultHeight = first.height;
-  return true;
+  return xtch::Error::Ok;
 }
 
 bool XtchBook::ensurePageTableWindow(const uint32_t pageIndex) {
@@ -309,9 +312,12 @@ bool XtchBook::ensurePageTableWindow(const uint32_t pageIndex) {
   return true;
 }
 
-bool XtchBook::readPageTableEntry(const uint32_t pageIndex, xtch::PageInfo& info) {
+xtch::Error XtchBook::readPageTableEntry(const uint32_t pageIndex, xtch::PageInfo& info) {
   if (pageIndex >= header.pageCount) {
-    return false;
+    return xtch::Error::PageOutOfRange;
+  }
+  if (header.pageTableOffset == 0) {
+    return xtch::Error::CorruptedHeader;
   }
   if (ensurePageTableWindow(pageIndex)) {
     const xtch::PageTableEntry& entry = pageTableWindow[pageIndex - pageTableWindowStart];
@@ -319,26 +325,28 @@ bool XtchBook::readPageTableEntry(const uint32_t pageIndex, xtch::PageInfo& info
     info.size = entry.dataSize;
     info.width = entry.width;
     info.height = entry.height;
-    return true;
+    return xtch::Error::Ok;
   }
   // Window refill failed; still try a single row so the page can load.
   if (!ensureOpen()) {
-    return false;
+    return xtch::Error::FileNotFound;
   }
   const uint64_t entryOffset =
       header.pageTableOffset + static_cast<uint64_t>(pageIndex) * sizeof(xtch::PageTableEntry);
   if (!file.seek64(entryOffset)) {
-    return false;
+    LOG_ERR("XTCH", "Page table entry %lu seek failed", static_cast<unsigned long>(pageIndex));
+    return xtch::Error::ReadError;
   }
   xtch::PageTableEntry entry{};
   if (static_cast<size_t>(file.read(reinterpret_cast<uint8_t*>(&entry), sizeof(entry))) != sizeof(entry)) {
-    return false;
+    LOG_ERR("XTCH", "Page table entry %lu unreadable", static_cast<unsigned long>(pageIndex));
+    return xtch::Error::ReadError;
   }
   info.offset = entry.dataOffset;
   info.size = entry.dataSize;
   info.width = entry.width;
   info.height = entry.height;
-  return true;
+  return xtch::Error::Ok;
 }
 
 uint32_t XtchBook::clusterLruLookup(const uint32_t pageIndex) {
@@ -388,14 +396,17 @@ void XtchBook::clusterLruRemember(const uint32_t pageIndex, const uint32_t clust
   }
 }
 
-bool XtchBook::pageInfo(const uint32_t pageIndex, xtch::PageInfo& info) { return readPageTableEntry(pageIndex, info); }
+bool XtchBook::pageInfo(const uint32_t pageIndex, xtch::PageInfo& info) {
+  return readPageTableEntry(pageIndex, info) == xtch::Error::Ok;
+}
 
 xtch::Error XtchBook::loadPageData(const uint32_t pageIndex) {
   loadedPageIndex = 0xFFFFFFFFu;
   const uint32_t tTable = millis();
   xtch::PageInfo page{};
-  if (!readPageTableEntry(pageIndex, page)) {
-    return xtch::Error::PageOutOfRange;
+  const xtch::Error tableErr = readPageTableEntry(pageIndex, page);
+  if (tableErr != xtch::Error::Ok) {
+    return tableErr;
   }
   const uint32_t tableMs = millis() - tTable;
   if (!ensureOpen()) {
@@ -522,6 +533,7 @@ xtch::Error XtchBook::loadPageData(const uint32_t pageIndex) {
 void XtchBook::readChapters() {
   chapters.clear();
   chaptersLoaded = true;
+  chaptersBroken = false;
   if (!chaptersAvailable) {
     return;
   }
@@ -532,13 +544,18 @@ void XtchBook::readChapters() {
     return;
   }
   if (!ensureOpen()) {
+    LOG_ERR("XTCH", "Chapter table reopen failed");
     chaptersAvailable = false;
+    chaptersBroken = true;
     return;
   }
   constexpr uint64_t kChapterEntrySize = 96;
   const uint64_t fileSize = file.fileSize64();
   if (chapterOffset < sizeof(header) || chapterOffset >= fileSize || chapterOffset + kChapterEntrySize > fileSize) {
+    LOG_ERR("XTCH", "Chapter table offset %llu outside file (%llu)", static_cast<unsigned long long>(chapterOffset),
+            static_cast<unsigned long long>(fileSize));
     chaptersAvailable = false;
+    chaptersBroken = true;
     closeFile();
     return;
   }
@@ -552,7 +569,9 @@ void XtchBook::readChapters() {
     maxOffset = header.dataOffset;
   }
   if (maxOffset <= chapterOffset || !file.seek64(chapterOffset)) {
+    LOG_ERR("XTCH", "Chapter table seek failed");
     chaptersAvailable = false;
+    chaptersBroken = true;
     closeFile();
     return;
   }
@@ -561,6 +580,7 @@ void XtchBook::readChapters() {
   if (chapterCount == 0 || chapterCount > header.pageCount) {
     if (chapterCount > header.pageCount) {
       LOG_ERR("XTCH", "Chapter count %u exceeds pageCount %u", static_cast<unsigned>(chapterCount), header.pageCount);
+      chaptersBroken = true;
     }
     chaptersAvailable = false;
     closeFile();
@@ -571,6 +591,8 @@ void XtchBook::readChapters() {
   uint8_t buf[kChapterEntrySize];
   for (size_t i = 0; i < chapterCount; ++i) {
     if (static_cast<size_t>(file.read(buf, sizeof(buf))) != sizeof(buf)) {
+      LOG_ERR("XTCH", "Short chapter read at %u of %u", static_cast<unsigned>(i), static_cast<unsigned>(chapterCount));
+      chaptersBroken = true;
       break;
     }
     char nameBuf[81];
@@ -663,10 +685,16 @@ bool XtchBook::drawPage(Gfx& gfx, const uint32_t pageIndex, int& pagesUntilFullR
     return false;
   };
 
+  // A prior page's cleanup may still be pending. The new page and an error
+  // screen both present, and both need the DTM banks already resynced. Its
+  // PERF cleanup line is not part of this page's total.
+  flushPendingCleanup(gfx);
+
   xtch::PageInfo page{};
-  if (!readPageTableEntry(pageIndex, page)) {
-    LOG_ERR("XTCH", "Page %lu out of range or unreadable", static_cast<unsigned long>(pageIndex));
-    return fail(xtch::Error::PageOutOfRange);
+  const xtch::Error tableErr = readPageTableEntry(pageIndex, page);
+  if (tableErr != xtch::Error::Ok) {
+    LOG_ERR("XTCH", "Page %lu %s", static_cast<unsigned long>(pageIndex), xtch::errorName(tableErr));
+    return fail(tableErr);
   }
   if (static_cast<int>(page.width) > gfx.width() || static_cast<int>(page.height) > gfx.height()) {
     LOG_ERR("XTCH", "Page %lu is %ux%u, screen %dx%d", static_cast<unsigned long>(pageIndex), page.width, page.height,
@@ -684,14 +712,19 @@ bool XtchBook::drawPage(Gfx& gfx, const uint32_t pageIndex, int& pagesUntilFullR
   const size_t planeSize = colBytes * static_cast<size_t>(pageWidth);
   const bool prefetched = loadedPageIndex == pageIndex && pageBuffer != nullptr;
 
-  // A prior page's cleanup may still be pending; the new page's own display
-  // calls need the DTM banks already resynced, so flush before touching fb.
-  // Its PERF cleanup line is not part of this page's total.
-  flushPendingCleanup(gfx);
   const uint32_t tPage = millis();
 
   if (!prefetched) {
-    const xtch::Error loadErr = loadPageData(pageIndex);
+    xtch::Error loadErr = loadPageData(pageIndex);
+    // One reopen. A wedged file handle or a stale FAT cluster otherwise fails
+    // the same way on the next attempt, and the cluster cache is what setPos
+    // would reuse.
+    if (loadErr == xtch::Error::ReadError || loadErr == xtch::Error::FileNotFound) {
+      LOG_INF("XTCH", "Retry page %lu after %s", static_cast<unsigned long>(pageIndex), xtch::errorName(loadErr));
+      closeFile();
+      clusterLruCount = 0;
+      loadErr = loadPageData(pageIndex);
+    }
     if (loadErr != xtch::Error::Ok) {
       return fail(loadErr);
     }
@@ -807,5 +840,10 @@ void XtchBook::prefetchForward(const uint32_t fromPageIndex) {
   if (err != xtch::Error::Ok) {
     LOG_DBG("XTCH", "Prefetch page %lu failed: %s", static_cast<unsigned long>(fromPageIndex + 1),
             xtch::errorName(err));
+    // Drop a handle that died mid-read so the next draw opens clean. The draw
+    // path retries once; doing it here as well would read the page four times.
+    if (err == xtch::Error::ReadError || err == xtch::Error::FileNotFound) {
+      closeFile();
+    }
   }
 }

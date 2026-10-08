@@ -16,6 +16,7 @@ class BrowserScreen final : public Screen {
   int window = 0;
   uint8_t shownMinute = 255;
   Mode mode = Mode::Books;
+  bool unreadable = false;
 
   void load();
   void activate();

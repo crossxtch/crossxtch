@@ -34,7 +34,9 @@ struct Settings {
   uint8_t language = kLanguageUnset;  // kLanguageEnglish/Japanese/Chinese; unset until first pick
 
   void load();
-  void save() const;
+  // False when the file cannot be created or the write is short. The in-memory
+  // settings are kept either way.
+  bool save() const;
   unsigned long gyroAutoOffTimeoutMs() const;
   unsigned long trueSleepTimeoutMs() const;
   bool languageChosen() const { return language <= kLanguageChinese; }

@@ -64,20 +64,21 @@ void Settings::load() {
           clockUtcOffsetQ, language, lastBookPath);
 }
 
-void Settings::save() const {
+bool Settings::save() const {
   Storage.ensureDirectoryExists(kDir);
   HalFile f;
   if (!Storage.openFileForWrite("SET", kPath, f)) {
     LOG_ERR("SET", "Could not write %s", kPath);
-    return;
+    return false;
   }
   const size_t n = f.write(this, sizeof(*this));
   if (n != sizeof(*this)) {
     LOG_ERR("SET", "Short settings write (%u of %u)", static_cast<unsigned>(n), static_cast<unsigned>(sizeof(*this)));
-    return;
+    return false;
   }
   LOG_DBG("SET", "Saved gyroOff=%u sleep=%u refresh=%u night=%u tilt=%u lang=%u last='%s'", gyroAutoOffSeconds,
           trueSleepMinutes, refreshEveryNPages, nightMode, tiltPageTurn, language, lastBookPath);
+  return true;
 }
 
 namespace {

@@ -21,7 +21,7 @@ class ChapterSelectionScreen final : public Screen {
  public:
   ChapterSelectionScreen(Gfx& gfx, MappedInput& input, ReaderScreen& reader,
                          const std::vector<xtch::ChapterInfo>& chapterList, uint32_t currentPage,
-                         uint16_t pageCount);
+                         uint16_t pageCount, bool unreadable = false);
   void loop() override;
   void render() override;
 };

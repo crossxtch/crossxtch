@@ -43,6 +43,8 @@ class XtchBook {
 
   // Header flag only; getChapters() parses once and caches.
   bool hasChapters() const { return chaptersAvailable; }
+  // True after getChapters() if the table was present but could not be read.
+  bool chapterReadFailed() const { return chaptersBroken; }
   const std::vector<xtch::ChapterInfo>& getChapters();
 
   // Paints a 2-bit page and runs the display sequence; caller must not present() on success.
@@ -73,6 +75,7 @@ class XtchBook {
   std::vector<xtch::ChapterInfo> chapters;
   bool chaptersAvailable = false;
   bool chaptersLoaded = false;
+  bool chaptersBroken = false;
   // Shared decoded-page scratch, sized for the panel. Kept across book close()
   // so the next open does not have to find a ~100 KB hole in a fragmented heap.
   static uint8_t* pageBuffer;
@@ -103,9 +106,11 @@ class XtchBook {
   void closeFile();
   xtch::Error readHeader();
   xtch::Error readMetadata();
-  bool loadPageTable();
+  xtch::Error loadPageTable();
   bool ensurePageTableWindow(uint32_t pageIndex);
-  bool readPageTableEntry(uint32_t pageIndex, xtch::PageInfo& info);
+  // PageOutOfRange when the index is past pageCount. ReadError / FileNotFound
+  // when the row cannot be read. CorruptedHeader when the table offset is 0.
+  xtch::Error readPageTableEntry(uint32_t pageIndex, xtch::PageInfo& info);
   uint32_t clusterLruLookup(uint32_t pageIndex);
   void clusterLruRemember(uint32_t pageIndex, uint32_t cluster);
   xtch::Error loadPageData(uint32_t pageIndex);

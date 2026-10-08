@@ -40,18 +40,24 @@ void HomeScreen::loop() {
     const bool hasContinue = itemCount == 4;
     // Item order: [Continue?], Browse, File Transfer, Settings.
     int i = index - (hasContinue ? 1 : 0);
+    bool opened = false;
     if (hasContinue && index == 0) {
       LOG_DBG("HOME", "Continue");
-      goToReader(settings.lastBookPath);
+      opened = goToReader(settings.lastBookPath);
     } else if (i == 0) {
       LOG_DBG("HOME", "Browse");
-      goToBrowser();
+      opened = goToBrowser();
     } else if (i == 1) {
       LOG_DBG("HOME", "File Transfer");
-      goToWifiFileTransfer();
+      opened = goToWifiFileTransfer();
     } else {
       LOG_DBG("HOME", "Settings");
-      goToSettings();
+      opened = goToSettings();
+    }
+    if (!opened) {
+      setNotice(uiText::outOfMemory);
+    } else {
+      notice = nullptr;
     }
   }
 }
@@ -79,5 +85,6 @@ void HomeScreen::render() {
   if (hasContinue) {
     gfx.drawText(FONT_UI, 24, gfx.height() - 48, settings.lastBookPath);
   }
+  drawNotice();
   presentUi();
 }

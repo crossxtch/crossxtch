@@ -4,6 +4,7 @@
 #include <Logging.h>
 
 #include "core/ScreenManager.h"
+#include "core/fontIds.h"
 
 void Screen::onEnter() {
   LOG_DBG("SCR", "Enter %s", name);
@@ -17,6 +18,18 @@ void Screen::onResume() { needsCleanRefresh = true; }
 void Screen::presentUi() {
   gfx.present(needsCleanRefresh ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
   needsCleanRefresh = false;
+}
+
+void Screen::setNotice(const char* text) {
+  notice = text;
+  requestUpdate();
+}
+
+void Screen::drawNotice(const int y) {
+  if (!notice || notice[0] == '\0') {
+    return;
+  }
+  gfx.drawCenteredText(FONT_UI, y >= 0 ? y : gfx.height() - 28, notice);
 }
 
 void Screen::requestUpdate() { screenManager.requestUpdate(); }

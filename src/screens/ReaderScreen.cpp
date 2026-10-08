@@ -58,19 +58,21 @@ void ReaderScreen::saveProgress() const {
     LOG_ERR("PRG", "Could not write %s", p);
     return;
   }
-  f.write(&page, sizeof(page));
+  const size_t n = f.write(&page, sizeof(page));
+  if (n != sizeof(page)) {
+    LOG_ERR("PRG", "Short progress write (%u of %u)", static_cast<unsigned>(n), static_cast<unsigned>(sizeof(page)));
+  }
 }
 
-void ReaderScreen::onEnter() {
-  Screen::onEnter();
-  pagesUntilFull = settings.refreshEveryNPages;
+bool ReaderScreen::tryOpen() {
   if (xtch.open(bookPath) != xtch::Error::Ok) {
     LOG_ERR("RDR", "Failed to open %s: %s", bookPath, xtch::errorName(xtch.lastError()));
     loaded = false;
-    requestUpdate();
-    return;
+    return false;
   }
   loaded = true;
+  pageFailed = false;
+  memFailed = false;
   loadProgress();
   if (page >= xtch.pageCount()) {
     LOG_INF("RDR", "Saved page %lu past end (%u), clamping", static_cast<unsigned long>(page), xtch.pageCount());
@@ -80,6 +82,13 @@ void ReaderScreen::onEnter() {
   settings.save();
   LOG_INF("RDR", "Open %s page %lu/%u '%s'", bookPath, static_cast<unsigned long>(page + 1), xtch.pageCount(),
           xtch.title());
+  return true;
+}
+
+void ReaderScreen::onEnter() {
+  Screen::onEnter();
+  pagesUntilFull = settings.refreshEveryNPages;
+  tryOpen();
   requestUpdate();
 }
 
@@ -96,8 +105,10 @@ void ReaderScreen::onResume() { pagesUntilFull = 1; }
 
 void ReaderScreen::loop() {
   if (!loaded) {
-    if (input.wasReleased(MappedInput::Button::Back) || input.wasReleased(MappedInput::Button::Confirm)) {
+    if (input.wasReleased(MappedInput::Button::Back)) {
       finish();
+    } else if (input.wasReleased(MappedInput::Button::Confirm) && tryOpen()) {
+      requestUpdate();
     }
     return;
   }
@@ -113,15 +124,31 @@ void ReaderScreen::loop() {
     xtch.flushPendingCleanup(gfx);
   }
 
-  if (input.wasReleased(MappedInput::Button::Back)) {
+  // Confirm retries the page that failed. Back still leaves the book.
+  // A page turn falls through and clears the hold.
+  if (pageFailed || memFailed) {
+    if (input.wasReleased(MappedInput::Button::Back)) {
+      finish();
+      return;
+    }
+    if (input.wasReleased(MappedInput::Button::Confirm)) {
+      pageFailed = false;
+      memFailed = false;
+      requestUpdate();
+      return;
+    }
+  } else if (input.wasReleased(MappedInput::Button::Back)) {
     finish();
     return;
-  }
-  if (input.wasReleased(MappedInput::Button::Confirm)) {
+  } else if (input.wasReleased(MappedInput::Button::Confirm)) {
     pagesUntilFull = 1;
-    auto screen = makeUniqueNoThrow<ChapterSelectionScreen>(gfx, input, *this, xtch.getChapters(), page, xtch.pageCount());
+    const auto& chapterList = xtch.getChapters();
+    auto screen = makeUniqueNoThrow<ChapterSelectionScreen>(gfx, input, *this, chapterList, page, xtch.pageCount(),
+                                                            xtch.chapterReadFailed());
     if (!screen) {
       LOG_ERR("RDR", "OOM: chapters");
+      memFailed = true;
+      requestUpdate();
       return;
     }
     push(std::move(screen));
@@ -150,19 +177,33 @@ void ReaderScreen::loop() {
     }
   }
   if (moved) {
+    pageFailed = false;
+    memFailed = false;
     LOG_DBG("RDR", "Page %lu/%u", static_cast<unsigned long>(page + 1), xtch.pageCount());
     saveProgress();
     requestUpdate();
   }
 }
 
-void ReaderScreen::showStatus(const char* title, const char* detail) {
+void ReaderScreen::showStatus(const char* title, const char* detail, const char* hint) {
   gfx.clear(false);
-  gfx.drawCenteredText(FONT_UI_BOLD, gfx.height() / 2 - 20, title);
-  if (detail && detail[0] != '\0') {
-    gfx.drawCenteredText(FONT_UI, gfx.height() / 2 + 10, detail);
+  const int mid = gfx.height() / 2;
+  if (hint && hint[0] != '\0') {
+    gfx.drawCenteredText(FONT_UI_BOLD, mid - 36, title);
+    if (detail && detail[0] != '\0') {
+      gfx.drawCenteredText(FONT_UI, mid, detail);
+    }
+    gfx.drawCenteredText(FONT_UI, mid + 36, hint);
+  } else {
+    gfx.drawCenteredText(FONT_UI_BOLD, mid - 20, title);
+    if (detail && detail[0] != '\0') {
+      gfx.drawCenteredText(FONT_UI, mid + 10, detail);
+    }
   }
   gfx.present(HalDisplay::HALF_REFRESH);
+  // The next real page has to rebuild the gray base. A fast refresh over this
+  // text leaves it ghosted on the panel.
+  pagesUntilFull = 1;
 }
 
 void ReaderScreen::jumpToPage(const uint32_t targetPage) {
@@ -170,22 +211,45 @@ void ReaderScreen::jumpToPage(const uint32_t targetPage) {
     return;
   }
   page = targetPage;
+  pageFailed = false;
+  memFailed = false;
   pagesUntilFull = 1;
   LOG_INF("RDR", "Jumped to page %lu/%u", static_cast<unsigned long>(page + 1), xtch.pageCount());
   saveProgress();
   requestUpdate();
 }
 
+void ReaderScreen::showPageError() {
+  const char* detail = uiText::xtchError(xtch.lastError());
+  const char* title = uiText::couldNotReadFile;
+  // ReadError and out-of-memory already say the whole thing. A second copy of
+  // the same line is just noise on the panel.
+  if (detail == title || detail == uiText::outOfMemory) {
+    title = detail;
+    detail = nullptr;
+  }
+  showStatus(title, detail, uiText::confirmRetry);
+}
+
 void ReaderScreen::render() {
   if (!loaded) {
-    showStatus(uiText::couldNotOpenBook, uiText::error(xtch::errorName(xtch.lastError())));
+    showStatus(uiText::couldNotOpenBook, uiText::xtchError(xtch.lastError()), uiText::confirmRetry);
+    return;
+  }
+  if (memFailed) {
+    showStatus(uiText::outOfMemory, nullptr, uiText::confirmRetry);
+    return;
+  }
+  if (pageFailed) {
+    showPageError();
     return;
   }
 
   const bool painted = xtch.drawPage(gfx, page, pagesUntilFull, settings.refreshEveryNPages);
   if (!painted) {
     LOG_ERR("RDR", "Blit page %lu failed: %s", static_cast<unsigned long>(page), xtch::errorName(xtch.lastError()));
-    showStatus(uiText::error(xtch::errorName(xtch.lastError())));
+    pageFailed = true;
+    showPageError();
     return;
   }
   if (power::tiltLocked()) {

@@ -55,8 +55,10 @@ BrowserScreen::BrowserScreen(Gfx& gfx, MappedInput& input, const char* initialPa
 void BrowserScreen::load() {
   entries.clear();
   entries.reserve(64);
+  unreadable = false;
   HalFile root = Storage.open(path.c_str());
   if (!root || !root.isDirectory()) {
+    unreadable = true;
     LOG_ERR("DIR", "Cannot open %s", path.c_str());
     return;
   }
@@ -97,6 +99,7 @@ void BrowserScreen::onResume() {
 }
 
 void BrowserScreen::goUp() {
+  notice = nullptr;
   if (path == "/") {
     finish();
     return;
@@ -118,6 +121,7 @@ void BrowserScreen::activate() {
   }
   const std::string& name = entries[static_cast<size_t>(index)];
   if (!name.empty() && name.back() == '/') {
+    notice = nullptr;
     path = joinPath(path.c_str(), name.substr(0, name.size() - 1).c_str());
     LOG_DBG("DIR", "Enter %s", path.c_str());
     index = 0;
@@ -131,8 +135,10 @@ void BrowserScreen::activate() {
     auto screen = makeUniqueNoThrow<UpdateScreen>(gfx, input, next.c_str());
     if (!screen) {
       LOG_ERR("DIR", "OOM: update");
+      setNotice(uiText::outOfMemory);
       return;
     }
+    notice = nullptr;
     push(std::move(screen));
     return;
   }
@@ -142,9 +148,12 @@ void BrowserScreen::activate() {
   entries.shrink_to_fit();
   if (!goToReader(next.c_str())) {
     LOG_ERR("DIR", "OOM: reader");
+    setNotice(uiText::outOfMemory);
     load();
     requestUpdate();
+    return;
   }
+  notice = nullptr;
 }
 
 void BrowserScreen::loop() {
@@ -172,10 +181,12 @@ void BrowserScreen::render() {
 
   const int rowH = gfx.lineHeight(FONT_UI) + 8;
   const int top = pathY + gfx.lineHeight(FONT_UI_BOLD) + 8;
-  const int bottomPad = mode == Mode::Firmware ? 52 : 24;
+  const int bottomPad = (mode == Mode::Firmware ? 52 : 24) + (notice ? 24 : 0);
   const int rows = (gfx.height() - top - bottomPad) / rowH;
   ui::followWindow(window, index, rows);
-  if (entries.empty()) {
+  if (unreadable) {
+    gfx.drawCenteredText(FONT_UI, gfx.height() / 2, uiText::couldNotOpenFile);
+  } else if (entries.empty()) {
     gfx.drawCenteredText(FONT_UI, gfx.height() / 2, mode == Mode::Firmware ? uiText::noBinFiles : uiText::noBooks);
   } else {
     const int last = std::min(window + rows, static_cast<int>(entries.size()));
@@ -183,7 +194,9 @@ void BrowserScreen::render() {
       ui::drawRow(gfx, top + (i - window) * rowH, rowH, entries[static_cast<size_t>(i)].c_str(), i == index);
     }
   }
-  if (mode == Mode::Firmware) {
+  if (notice) {
+    drawNotice(mode == Mode::Firmware ? gfx.height() - 52 : -1);
+  } else if (mode == Mode::Firmware) {
     gfx.drawCenteredText(FONT_UI, gfx.height() - 28, uiText::backToCancel);
   }
   presentUi();

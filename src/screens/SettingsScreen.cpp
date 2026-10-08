@@ -112,10 +112,25 @@ void bumpRefresh() {
 }
 }  // namespace
 
+bool SettingsScreen::persist() {
+  if (settings.save()) {
+    saveWarned = false;
+    notice = nullptr;
+    return true;
+  }
+  setNotice(uiText::writeFailed);
+  return false;
+}
+
 void SettingsScreen::loop() {
   if (input.wasReleased(MappedInput::Button::Back)) {
-    settings.save();
-    finish();
+    // saveWarned is set only after the notice has already been painted, so a
+    // second Back leaves without another failed write and another refresh.
+    if (saveWarned || persist()) {
+      finish();
+      return;
+    }
+    saveWarned = true;
     return;
   }
   if (ui::statusMinuteChanged(shownMinute)) {
@@ -128,8 +143,10 @@ void SettingsScreen::loop() {
       auto screen = makeUniqueNoThrow<LanguageScreen>(gfx, input, false);
       if (!screen) {
         LOG_ERR("SET", "OOM: language");
+        setNotice(uiText::outOfMemory);
         return;
       }
+      notice = nullptr;
       push(std::move(screen));
       return;
     } else if (index == kSleep) {
@@ -151,11 +168,17 @@ void SettingsScreen::loop() {
       bumpGyroAutoOff();
       LOG_INF("SET", "Gyro auto-off %u sec", settings.gyroAutoOffSeconds);
     } else if (index == firmwareIndex()) {
-      settings.save();
+      if (!persist()) {
+        saveWarned = true;
+        return;
+      }
       goToFirmwareUpdate();
       return;
     }
-    settings.save();
+    if (!persist()) {
+      saveWarned = true;
+      return;
+    }
     requestUpdate();
   }
 }
@@ -194,6 +217,10 @@ void SettingsScreen::render() {
     ui::drawMenuRow(gfx, startY + i * rowH, rowH, labels[i], i == index);
   }
 
-  gfx.drawCenteredText(FONT_UI, gfx.height() - 40, "crossxtch " CROSSXTCH_VERSION);
+  if (notice) {
+    drawNotice(gfx.height() - 40);
+  } else {
+    gfx.drawCenteredText(FONT_UI, gfx.height() - 40, "crossxtch " CROSSXTCH_VERSION);
+  }
   presentUi();
 }

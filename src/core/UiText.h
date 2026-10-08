@@ -1,5 +1,7 @@
 #pragma once
 
+#include <XtchTypes.h>
+
 // On-device UI copy. CJK must fit firmware jp_12 (Noto Sans JP ideographs + kana).
 // English / Japanese / Chinese. `apply()` after settings.language changes.
 #define UI_STRINGS(X)                                                                                                 \
@@ -86,5 +88,6 @@ UI_STRINGS(UI_EXTERN)
 void apply();
 extern const char* languageName;
 const char* error(const char* en);
+const char* xtchError(xtch::Error err);
 
 }  // namespace uiText

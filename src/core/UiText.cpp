@@ -80,4 +80,30 @@ const char* error(const char* en) {
   return unknownError;
 }
 
+const char* xtchError(xtch::Error err) {
+  switch (err) {
+    case xtch::Error::FileNotFound:
+      return fileNotFound;
+    case xtch::Error::InvalidMagic:
+      return invalidFormat;
+    case xtch::Error::InvalidVersion:
+      return unsupportedVersion;
+    case xtch::Error::CorruptedHeader:
+      return corrupted;
+    case xtch::Error::PageOutOfRange:
+      return pageOutOfRange;
+    case xtch::Error::ReadError:
+      return couldNotReadFile;
+    case xtch::Error::TooLarge:
+      return pageTooLarge;
+    case xtch::Error::OutOfMemory:
+      return outOfMemory;
+    case xtch::Error::DecodeFailed:
+      return decodeFailed;
+    case xtch::Error::Ok:
+    default:
+      return unknownError;
+  }
+}
+
 }  // namespace uiText

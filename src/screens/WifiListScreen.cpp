@@ -41,8 +41,10 @@ bool WifiListScreen::promptPassword() {
                                                     WifiCredentialStore::kPasswordLen - 1, /*passwordMode=*/false);
   if (!keyboard) {
     LOG_ERR("WIFI", "OOM: keyboard");
+    setNotice(uiText::outOfMemory);
     return false;
   }
+  notice = nullptr;
   push(std::move(keyboard));
   return true;
 }
@@ -152,8 +154,12 @@ void WifiListScreen::goToFileTransfer() {
   auto transfer = makeUniqueNoThrow<FileTransferScreen>(gfx, input, pendingSsid);
   if (!transfer) {
     LOG_ERR("WIFI", "OOM: file transfer");
+    setNotice(uiText::outOfMemory);
+    // Stay on Connecting and pollConnect() would call this every tick.
+    showNetworkList();
     return;
   }
+  notice = nullptr;
   push(std::move(transfer));
 }
 
@@ -250,7 +256,7 @@ void WifiListScreen::render() {
       }
       const int rowH = gfx.lineHeight(FONT_UI) + 8;
       const int top = 64;
-      const int rows = (gfx.height() - top - 24) / rowH;
+      const int rows = (gfx.height() - top - (notice ? 48 : 24)) / rowH;
       ui::followWindow(window, index, rows);
       const int last = std::min(window + rows, static_cast<int>(networks.size()));
       char label[80];
@@ -284,5 +290,6 @@ void WifiListScreen::render() {
       break;
   }
 
+  drawNotice();
   presentUi();
 }

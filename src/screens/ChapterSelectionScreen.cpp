@@ -16,12 +16,16 @@
 
 ChapterSelectionScreen::ChapterSelectionScreen(Gfx& gfx, MappedInput& input, ReaderScreen& reader,
                                                const std::vector<xtch::ChapterInfo>& chapterList,
-                                               const uint32_t currentPage, const uint16_t pageCount)
+                                               const uint32_t currentPage, const uint16_t pageCount,
+                                               const bool unreadable)
     : Screen("Chapters", gfx, input),
       reader(reader),
       chapters(chapterList),
       currentPage(currentPage),
       pageCount(pageCount) {
+  if (unreadable) {
+    notice = uiText::couldNotReadFile;
+  }
   // Row 0 is the synthetic "Go to page" item; chapters start at row 1.
   for (size_t i = 0; i < chapters.size(); ++i) {
     if (currentPage >= chapters[i].startPage && currentPage <= chapters[i].endPage) {
@@ -36,8 +40,10 @@ void ChapterSelectionScreen::activate() {
     auto screen = makeUniqueNoThrow<PageJumpScreen>(gfx, input, reader, currentPage, pageCount);
     if (!screen) {
       LOG_ERR("SCR", "OOM: page jump");
+      setNotice(uiText::outOfMemory);
       return;
     }
+    notice = nullptr;
     push(std::move(screen));
     return;
   }
@@ -68,7 +74,7 @@ void ChapterSelectionScreen::render() {
 
   const int rowH = gfx.lineHeight(FONT_UI) + 8;
   const int top = 40;
-  const int rows = (gfx.height() - top - 24) / rowH;
+  const int rows = (gfx.height() - top - (notice ? 48 : 24)) / rowH;
   const int count = static_cast<int>(chapters.size()) + 1;
   ui::followWindow(window, index, rows);
   const int last = std::min(window + rows, count);
@@ -91,5 +97,6 @@ void ChapterSelectionScreen::render() {
     fillLabel(i);
     ui::drawRow(gfx, top + (i - window) * rowH, rowH, label, i == index);
   }
+  drawNotice();
   presentUi();
 }

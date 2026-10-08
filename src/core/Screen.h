@@ -44,6 +44,14 @@ class Screen {
   // HALF_REFRESH on the first paint after enter/resume, FAST afterwards.
   void presentUi();
 
+ protected:
+  // One line a screen can show after a failure that would otherwise look like
+  // a dead button. Cleared by the screen when the next action succeeds.
+  const char* notice = nullptr;
+  void setNotice(const char* text);
+  // y < 0 draws just above the bottom edge.
+  void drawNotice(int y = -1);
+
  private:
   bool needsCleanRefresh = true;
 };
