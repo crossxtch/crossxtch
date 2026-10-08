@@ -62,23 +62,6 @@ bool HalClock::getLocalTime(uint8_t& hour, uint8_t& minute, uint8_t utcOffsetQua
   return true;
 }
 
-bool HalClock::formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased, bool use12Hour) const {
-  if (bufSize < (use12Hour ? 9u : 6u)) return false;
-  uint8_t hour24 = 0;
-  uint8_t min = 0;
-  if (!getLocalTime(hour24, min, utcOffsetQuarterHoursBiased)) return false;
-
-  if (use12Hour) {
-    const bool pm = hour24 >= 12;
-    int hour12 = hour24 % 12;
-    if (hour12 == 0) hour12 = 12;
-    snprintf(buf, bufSize, "%d:%02d %s", hour12, min, pm ? "PM" : "AM");
-  } else {
-    snprintf(buf, bufSize, "%02d:%02d", hour24, min);
-  }
-  return true;
-}
-
 bool HalClock::syncFromNTP() {
   if (!_available) return false;
 

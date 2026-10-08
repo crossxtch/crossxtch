@@ -1,6 +1,4 @@
 #include <HalGPIO.h>
-#include <Logging.h>
-#include <PowerManager.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <XteinkDetect.h>
@@ -60,7 +58,6 @@ void HalGPIO::begin() {
   }
 #endif
 
-
   SPI.begin(EPD_SCLK, SPI_MISO, EPD_MOSI, EPD_CS);
 
 #if FREEINK_DEVICE_X4
@@ -70,14 +67,7 @@ void HalGPIO::begin() {
   inputMgr.begin();
 }
 
-void HalGPIO::update() {
-  inputMgr.update();
-  const bool connected = isUsbConnected();
-  usbStateChanged = (connected != lastUsbConnected);
-  lastUsbConnected = connected;
-}
-
-bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
+void HalGPIO::update() { inputMgr.update(); }
 
 bool HalGPIO::isPressed(uint8_t buttonIndex) const { return inputMgr.isPressed(buttonIndex); }
 
@@ -89,45 +79,7 @@ bool HalGPIO::wasReleased(uint8_t buttonIndex) const { return inputMgr.wasReleas
 
 bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased(); }
 
-unsigned long HalGPIO::getHeldTime() const { return inputMgr.getHeldTime(); }
-
 unsigned long HalGPIO::getPowerButtonHeldTime() const { return inputMgr.getPowerButtonHeldTime(); }
-
-bool HalGPIO::hasTouch() const { return inputMgr.hasTouch(); }
-
-bool HalGPIO::hasHomeKey() const { return BoardConfig::hasHomeKey(); }
-
-bool HalGPIO::wasHomeKeyTapped() const { return inputMgr.wasHomeKeyTapped(); }
-
-bool HalGPIO::wasHomeKeyLongPressed() const { return inputMgr.wasHomeKeyLongPressed(); }
-
-bool HalGPIO::wasTouchTap(float& nx, float& ny) const { return inputMgr.wasTouchTap(nx, ny); }
-
-bool HalGPIO::wasTouchDown(float& nx, float& ny) const { return inputMgr.wasTouchPressedAt(nx, ny); }
-
-bool HalGPIO::wasTouchReleased() const { return inputMgr.wasTouchReleased(); }
-
-bool HalGPIO::isTouchTapCandidate(float& nx, float& ny, unsigned long& heldMs) const {
-  return inputMgr.isTouchTapCandidate(nx, ny, heldMs);
-}
-
-bool HalGPIO::isTouchHeldAt(float& nx, float& ny) const { return inputMgr.isTouchHeldAt(nx, ny); }
-
-bool HalGPIO::wasTouchLongPress(float& nx, float& ny) const { return inputMgr.wasTouchLongPress(nx, ny); }
-
-void HalGPIO::suppressTouchContact() { inputMgr.suppressTouchContact(); }
-
-unsigned long HalGPIO::lastTouchHeldMs() const { return inputMgr.lastTouchHeldMs(); }
-
-bool HalGPIO::wasSwipe(float& nxStart, float& nyStart, float& nxEnd, float& nyEnd) const {
-  return inputMgr.wasSwipe(nxStart, nyStart, nxEnd, nyEnd);
-}
-
-bool HalGPIO::wasTouchActivity() const { return inputMgr.wasTouchActivity(); }
-
-void HalGPIO::setSharedConfirmPowerShortPressEmitsPower(const bool enabled) {
-  InputManager::setSharedConfirmPowerShortPressEmitsPower(enabled);
-}
 
 bool HalGPIO::hasEdgeSideButtons() const {
   return BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3 ||
@@ -147,9 +99,6 @@ bool HalGPIO::verifyPowerButtonWakeup(uint16_t requiredDurationMs, bool shortPre
   if (BoardConfig::isX4Pro() || BoardConfig::ACTIVE.input.power < 0) {
     return true;
   }
-#if defined(FREEINK_DEVICE_M5PAPER) && FREEINK_DEVICE_M5PAPER
-  return true;
-#endif
   if (shortPressAllowed) {
     // Fast path - no duration check needed
     return true;

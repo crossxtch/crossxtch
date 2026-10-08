@@ -130,8 +130,8 @@ int MappedInput::consumeReaderPageDelta() {
   if (wasReleased(Button::Left) || (!edgeSides && wasReleased(Button::Up))) {
     --delta;
   }
-  // Flick gesture pages forward only, regardless of flick direction.
-  if (settings.tiltPageTurn && (halTiltSensor.wasTiltedForward() || halTiltSensor.wasTiltedBack())) {
+  // A flick pages forward, in either direction.
+  if (settings.tiltPageTurn && halTiltSensor.consumeFlick()) {
     ++delta;
   }
   delta += static_cast<int>(consumePendingForwardTaps());

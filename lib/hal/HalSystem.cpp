@@ -17,6 +17,16 @@
 #define MAX_PANIC_STACK_DEPTH 32
 #define PANIC_CAPTURE_MAGIC 0x50414E49u
 
+namespace HalSystem {
+struct StackFrame {
+  uint32_t sp;
+  uint32_t spp[8];
+};
+
+void clearPanic();
+std::string getPanicInfo(bool full);
+}  // namespace HalSystem
+
 RTC_NOINIT_ATTR char panicMessage[256];
 RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
 // RTC_NOINIT is uninitialized on cold boot, so only this exact marker proves a

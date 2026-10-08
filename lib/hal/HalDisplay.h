@@ -4,93 +4,42 @@
 
 class HalDisplay {
  public:
-  // Constructor with pin configuration
   HalDisplay();
 
-  // Destructor
-  ~HalDisplay();
-
-  // Refresh modes
   enum RefreshMode {
     FULL_REFRESH,  // Full refresh with complete waveform
     HALF_REFRESH,  // Scrub refresh: every pixel driven to target
     FAST_REFRESH   // Fast refresh using custom LUT
   };
 
-  // Pass seamless=true on any path where the panel already shows the
-  // content it should after begin() returns (silent reboot's popup,
-  // sleep-wake with a restored buffer). Skips the wakeup-gated
-  // requestResync() and defuses the SDK's X3 _x3InitialFullSyncsRemaining
-  // counter; otherwise the first two paints get promoted to FULL
-  // (~770ms each on X3).
-  void begin(bool seamless = false);
+  void begin();
 
-  // Display dimensions
-  static constexpr uint16_t DISPLAY_WIDTH = EInkDisplay::DISPLAY_WIDTH;
-  static constexpr uint16_t DISPLAY_HEIGHT = EInkDisplay::DISPLAY_HEIGHT;
-  static constexpr uint16_t DISPLAY_WIDTH_BYTES = DISPLAY_WIDTH / 8;
-  static constexpr uint32_t BUFFER_SIZE = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT;
-
-  // Frame buffer operations
   void clearScreen(uint8_t color = 0xFF) const;
-  void drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                 bool fromProgmem = false) const;
-  void drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                            bool fromProgmem = false) const;
-
   void displayBuffer(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
-  // Non-blocking refresh (shadow-free): starts the panel waveform and returns
-  // while the panel refreshes on its own. The framebuffer must stay untouched
-  // until waitRefreshComplete(), and the caller must rebuild the differential
-  // baseline before the next differential update (the tiled grayscale cleanup
-  // does). Panels without deferral fall back to a blocking refresh.
-  void displayBufferAsync(RefreshMode mode = RefreshMode::FAST_REFRESH);
-  // Block until a pending deferred refresh completes (no-op when none is).
-  void waitRefreshComplete();
-  // True when displayBufferAsync() genuinely overlaps (panel driver defers);
-  // false where it falls back to a blocking refresh.
-  bool supportsAsyncRefresh() const;
-  void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
 
-  // Optional poll during blocking BUSY waits (e.g. button edges the main loop would miss).
+  // Optional poll during blocking BUSY waits (button edges the main loop would miss).
   void setBusyWaitSliceHook(bool (*sliceHook)(int8_t busyPin, uint8_t busyLevel));
 
-  // Output polarity. The framebuffer remains in normal polarity; inversion is
-  // applied by the display driver while sending it to the panel.
+  // Framebuffer stays in normal polarity. The driver inverts while sending.
   void setInverted(bool inverted);
-  bool toggleInverted();
-  bool isInverted() const;
-
-  // Power management
   void deepSleep();
-
-  // Access to frame buffer
   uint8_t* getFrameBuffer() const;
 
-  // Lend the framebuffer's ~48 KB STORAGE to a memory-hungry phase (chapter
-  // builds) without freeing it: the allocation never moves, so repeated loans
-  // cannot fragment the heap (free+realloc measurably did). No display calls
-  // between lend and return; the panel keeps its last refreshed image. The
-  // buffer comes back white — redraw fully. Returns nullptr if already lent.
-  uint8_t* lendFrameBufferStorage(uint32_t* sizeOut);
-  void returnFrameBufferStorage();
-
-  // X3 grayscale preconditioning (OEM "AA-pre-BW(mid)" settle pass), windowed
-  // to the gray region in physical panel coordinates (no-arg = full frame).
-  // Call after the BW base frame is displayed and before the grayscale planes
-  // are written; no-op on X4. See EInkDisplay::preconditionGrayscale.
+  // X3 grayscale preconditioning (OEM "AA-pre-BW(mid)" settle pass). Call after
+  // the BW base frame is displayed and before the grayscale planes are written.
+  // No-op on X4.
   void preconditionGrayscale();
-  void preconditionGrayscale(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
 
-  // Display the framebuffer as the base frame for a grayscale overlay that
-  // follows. On X3, HALF fallback first requests a resync to match
-  // displayBuffer(HALF); FAST fallback keeps the OEM differential base waveform
-  // ("AA-pre-BW(mid)"). Other panels display normally with `fallback` mode.
+  // Base frame for a grayscale overlay. On X3, HALF first requests a resync so
+  // the prior frame does not ghost through the differential waveform. FAST
+  // keeps that differential path. Other panels display with `fallback`.
   void displayGrayscaleBase(RefreshMode fallback = HALF_REFRESH, bool turnOffScreen = false);
+  // X3: fire the base waveform and return once BUSY is active so the host can
+  // paint the LSB plane in CPU RAM. finish waits it out. Other panels block in
+  // start. Do not SPI to the panel between start and finish.
   void startGrayscaleBase(RefreshMode fallback = HALF_REFRESH, bool turnOffScreen = false);
   void finishGrayscaleBase();
 
-  void copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer);
   void copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer);
   void copyGrayscaleMsbBuffers(const uint8_t* msbBuffer);
   void cleanupGrayscaleBuffers(const uint8_t* bwBuffer);
@@ -99,24 +48,12 @@ class HalDisplay {
   void startGrayBuffer(bool turnOffScreen = false);
   void finishGrayBuffer();
 
-  // Tiled grayscale: stream one band of a plane (lsbPlane selects LSB/MSB RAM)
-  // straight to the controller; supportsStripGrayscale() gates the path. See
-  // EInkDisplay::writeGrayscalePlaneStrip.
-  void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, uint16_t yStart, uint16_t numRows);
-  bool supportsStripGrayscale() const;
-
-  // True when displayGrayscaleBase() defers the base activation so the gray
-  // planes join it in a single waveform (Paper Mono). Callers should then route
-  // the base of a grayscale page through displayGrayscaleBase() instead of
-  // displayBuffer(): a separate B/W refresh first makes the gray pass re-drive
-  // the whole text body (a visible flash).
+  // True when the base and gray planes share one waveform (not X3/X4).
   bool combinesGrayscaleBase() const;
 
-  // Runtime geometry passthrough
   uint16_t getDisplayWidth() const;
   uint16_t getDisplayHeight() const;
   uint16_t getDisplayWidthBytes() const;
-  uint32_t getBufferSize() const;
 
  private:
   EInkDisplay einkDisplay;

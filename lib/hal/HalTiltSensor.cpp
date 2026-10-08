@@ -2,21 +2,20 @@
 
 #include <Logging.h>
 
+#include <cmath>
+
 HalTiltSensor halTiltSensor;  // Singleton instance
 
-bool HalTiltSensor::readGyro(float& gx, float& gy, float& gz) const {
+bool HalTiltSensor::readTiltRate(float& dps) const {
   Imu::Sample sample;
   if (!_sdkImu.read(sample)) return false;
-  gx = sample.gx;
-  gy = sample.gy;
-  gz = sample.gz;
+  dps = sample.gx;
   return true;
 }
 
 void HalTiltSensor::begin() {
   _available = _sdkImu.begin();
   if (_available) {
-    _initMs = millis();
     _lastPollMs = millis();
     // begin() leaves the sensors sampling; stand them by until tilt page turn
     // actually wakes them, so a disabled IMU doesn't drain the battery.
@@ -62,14 +61,14 @@ bool HalTiltSensor::deepSleep() {
   return true;
 }
 
-void HalTiltSensor::update(const uint8_t mode, const uint8_t orientation, const bool inReader) {
+void HalTiltSensor::update(const bool enabled, const bool inReader) {
   if (!_available) {
     return;
   }
 
   // Only sample in the reader. Leaving the IMU awake on home/settings
   // is a milliamps-level drain with no gesture to report.
-  const bool wantAwake = (mode != CrossPointTiltPageTurn::TILT_OFF) && inReader;
+  const bool wantAwake = enabled && inReader;
   if (wantAwake && !_isAwake) {
     _isAwake = wake();
     return;
@@ -93,30 +92,9 @@ void HalTiltSensor::update(const uint8_t mode, const uint8_t orientation, const 
   }
   _lastPollMs = now;
 
-  float gx, gy, gz;
-  if (!readGyro(gx, gy, gz)) {
+  float tiltAxis = 0;
+  if (!readTiltRate(tiltAxis)) {
     return;
-  }
-
-  // Map the gyro axis to left/right tilt based on reader orientation.
-  // On the X3 PCB: X axis = left/right in portrait, Y axis = left/right in landscape.
-  float tiltAxis;
-  switch (orientation) {
-    case CrossPointOrientation::PORTRAIT:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? -gx : gx;
-      break;
-    case CrossPointOrientation::INVERTED:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? gx : -gx;
-      break;
-    case CrossPointOrientation::LANDSCAPE_CW:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? gy : -gy;
-      break;
-    case CrossPointOrientation::LANDSCAPE_CCW:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? -gy : gy;
-      break;
-    default:
-      tiltAxis = gx;
-      break;
   }
 
   if (_inTilt) {
@@ -127,32 +105,20 @@ void HalTiltSensor::update(const uint8_t mode, const uint8_t orientation, const 
   } else {
     // Check for new tilt gesture (with cooldown)
     if ((now - _lastTiltMs) >= COOLDOWN_MS) {
-      if (tiltAxis > RATE_THRESHOLD_DPS) {
-        _tiltForwardEvent = true;
+      if (tiltAxis > RATE_THRESHOLD_DPS || tiltAxis < -RATE_THRESHOLD_DPS) {
+        _flickEvent = true;
         _hadActivity = true;
         _inTilt = true;
         _lastTiltMs = now;
-        LOG_INF("GYR", "Forward Trigger=(%.1f) dps", tiltAxis);
-      } else if (tiltAxis < -RATE_THRESHOLD_DPS) {
-        _tiltBackEvent = true;
-        _hadActivity = true;
-        _inTilt = true;
-        _lastTiltMs = now;
-        LOG_INF("GYR", "Backward Trigger=(%.1f) dps", tiltAxis);
+        LOG_INF("GYR", "Flick (%.1f) dps", tiltAxis);
       }
     }
   }
 }
 
-bool HalTiltSensor::wasTiltedForward() {
-  const bool val = _tiltForwardEvent;
-  _tiltForwardEvent = false;
-  return val;
-}
-
-bool HalTiltSensor::wasTiltedBack() {
-  const bool val = _tiltBackEvent;
-  _tiltBackEvent = false;
+bool HalTiltSensor::consumeFlick() {
+  const bool val = _flickEvent;
+  _flickEvent = false;
   return val;
 }
 
@@ -163,8 +129,7 @@ bool HalTiltSensor::hadActivity() {
 }
 
 void HalTiltSensor::clearPendingEvents() {
-  _tiltForwardEvent = false;
-  _tiltBackEvent = false;
+  _flickEvent = false;
   _hadActivity = false;
   // Intentionally preserve _inTilt so a held tilt doesn't retrigger on next poll
 }

@@ -1,8 +1,10 @@
 #include "Uc8253X3Driver.h"
 
+
 #include <BoardConfig.h>
 
 #include "../lut/Uc8253X3Luts.h"
+#include "../lut/UltraChipDirectGrayLuts.h"
 
 namespace freeink {
 namespace {
@@ -32,9 +34,13 @@ constexpr uint8_t CMD_LV_SELECTION = 0xE1;
 constexpr uint8_t CMD_PARTIAL_WINDOW = 0x90;
 constexpr uint8_t CMD_PARTIAL_IN = 0x91;
 constexpr uint8_t CMD_PARTIAL_OUT = 0x92;
+
 }  // namespace
 
 const Uc8253X3Config& uc8253X3DefaultConfig() {
+  static constexpr Uc8253LutBank directGray = {
+      kUltraChipDirectGray[0], kUltraChipDirectGray[4], kUltraChipDirectGray[2],
+      kUltraChipDirectGray[3], kUltraChipDirectGray[1]};
   static const Uc8253X3Config cfg = {
       {lut_x3_vcom_normal, lut_x3_ww_normal, lut_x3_bw_normal, lut_x3_wb_normal, lut_x3_bb_normal},
       {lut_x3_vcom_half, lut_x3_ww_half, lut_x3_bw_half, lut_x3_wb_half, lut_x3_bb_half},
@@ -44,6 +50,7 @@ const Uc8253X3Config& uc8253X3DefaultConfig() {
       {lut_x3_vcom_aa_pre_bw_mid, lut_x3_ww_aa_pre_bw_mid, lut_x3_bw_aa_pre_bw_mid, lut_x3_wb_aa_pre_bw_mid,
        lut_x3_bb_aa_pre_bw_mid},
       42,  // controller accepts 42 bytes of each 43-byte array
+      &directGray,
   };
   return cfg;
 }
@@ -79,20 +86,24 @@ void Uc8253X3Driver::loadBankCdi(EpdBus& bus, uint8_t cdi0, uint8_t cdi1, const 
 }
 
 void Uc8253X3Driver::fireDrf(EpdBus& bus) {
+  // PON only when the rails are down: a redundant PON on a powered UC8253 gives
+  // no BUSY LOW edge, so the X3TwoPhase wait burns its 1000 ms ceiling.
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" X3_PON");
     _isScreenOn = true;
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
-  // Confirm BUSY dropped LOW so waitDrf() only rides the LOW->HIGH phase.
+  // Confirm the waveform started (BUSY dropped LOW) before handing the CPU
+  // back, so waitDrf() only rides the LOW->HIGH phase. A missed edge falls
+  // through; waitRefreshComplete() still covers that case.
   const int8_t busyPin = bus.pins().busy;
   const unsigned long t0 = millis();
   while (digitalRead(busyPin) == HIGH && millis() - t0 < 50) delay(1);
 }
 
-void Uc8253X3Driver::waitDrf(EpdBus& bus, const bool turnOff) {
-  bus.waitRefreshComplete(" X3_DRF");
+void Uc8253X3Driver::waitDrf(EpdBus& bus, const bool turnOff, const char* label) {
+  bus.waitRefreshComplete(label);
   if (turnOff) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" X3_POF");
@@ -100,9 +111,31 @@ void Uc8253X3Driver::waitDrf(EpdBus& bus, const bool turnOff) {
   }
 }
 
-void Uc8253X3Driver::triggerRefresh(EpdBus& bus, bool turnOff) {
-  fireDrf(bus);
-  waitDrf(bus, turnOff);
+void Uc8253X3Driver::triggerRefresh(EpdBus &bus, bool turnOff,
+                                    const char *label) {
+  if (!_isScreenOn) {
+    bus.cmd(CMD_POWER_ON);
+    bus.waitBusy(" X3_PON");
+    _isScreenOn = true;
+  }
+  bus.cmd(CMD_DISPLAY_REFRESH);
+  bus.waitBusy(label);
+  if (turnOff) {
+    bus.cmd(CMD_POWER_OFF);
+    bus.waitBusy(" X3_POF");
+    _isScreenOn = false;
+  }
+}
+
+void Uc8253X3Driver::grayWindowIn(EpdBus &bus) {
+  const uint16_t xEnd = _w - 1;
+  const uint16_t yEnd = _h - 1;
+  const uint8_t window[9] = {
+      0, 0, static_cast<uint8_t>(xEnd >> 8), static_cast<uint8_t>(xEnd),
+      0, 0, static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd),
+      1};
+  bus.cmd(CMD_PARTIAL_IN);
+  bus.cmdData(CMD_PARTIAL_WINDOW, window, sizeof(window));
 }
 
 void Uc8253X3Driver::initController(EpdBus& bus) {
@@ -165,9 +198,13 @@ void Uc8253X3Driver::begin(EpdBus& bus) {
   _forcedConditionPassesNext = 0;
   _inGrayscaleMode = false;
   _grayState = {};
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _directGrayOnPanel = false;
   _pendingGrayBase = false;
   _pendingGray = false;
   _pendingGrayTurnOff = false;
+  _grayBaseSyncDtm1 = false;
   initController(bus);
 }
 
@@ -178,6 +215,15 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
 
 bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
   (void)prev;
+  const bool leavingDirectGray = _directGrayOnPanel;
+  _absoluteInput = false;
+  _directGrayPass = false;
+  if (_directGrayOnPanel) {
+    // Controller RAM contains selectors, not the displayed B/W baseline.
+    _directGrayOnPanel = false;
+    _redRamSynced = false;
+    _inGrayscaleMode = false;
+  }
   if (!_isScreenOn && !turnOff) {
     mode = RefreshMode::Half;  // wake transition gets a stronger waveform
   }
@@ -193,6 +239,16 @@ bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   const bool doHalfSync = halfMode && !doFullSync;
   _grayState.lastBaseWasPartial = !doFullSync;
 
+  if (leavingDirectGray && doFullSync) {
+    // Establish the destination before the full recovery's visible flash.
+    // HALF pairs WW==BW and WB==BB, making its drive independent of old RAM.
+    loadBankCdi(bus, 0xA9, 0x07, _cfg.half);
+    grayWindowIn(bus);
+    bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
+    bus.cmd(CMD_PARTIAL_OUT);
+    triggerRefresh(bus, false, " X3_BW_TARGET_DRF");
+  }
+
   if (doFullSync) {
     // _full OEM bank from a white DTM1 baseline (no software prev-frame buffer).
     loadBankCdi(bus, 0x29, 0x07, _cfg.full);
@@ -206,30 +262,15 @@ bool Uc8253X3Driver::displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t*
   } else {
     // _fast turbo differential; DTM1 retains the previous frame.
     loadBankCdi(bus, 0x29, 0x07, _cfg.fast);
-    if (_darkBackground) {
-      // Inverted content: a differential fast idles unchanged pixels, so the
-      // light residue of every white->black transition parks in the black
-      // background and accumulates between full syncs. Rewrite DTM1 as the
-      // complement of the target: every pixel classifies as changed and is
-      // re-driven toward its target — optically invisible on pixels already at
-      // their endpoint. displayFinish()'s DTM1 resync restores the true
-      // baseline afterwards. Same mechanism as the SSD1677/Paper Mono drivers'
-      // dark-background paths.
-      bus.sendPlaneFlippedInverted(CMD_DTM1, fb, _h, _wb);
-      bus.cmd(CMD_DATA_STOP);
-    }
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
   }
 
-  // A full sync re-issues PON while the charge pump is already on (higher
-  // current). That second PON does not pulse BUSY. waitBusy's X3 edge timeout
-  // is 1s, so waiting here stalled every full sync for a pulse that never came.
+  // PON only when the rails are down: a redundant PON on a powered UC8253 gives
+  // no BUSY LOW edge, so the X3TwoPhase wait burns its 1000 ms ceiling.
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" X3_PON");
     _isScreenOn = true;
-  } else if (doFullSync) {
-    bus.cmd(CMD_POWER_ON);
   }
   bus.cmd(CMD_DISPLAY_REFRESH);
   // Confirm the waveform actually started (BUSY dropped LOW) before handing the
@@ -315,9 +356,28 @@ void Uc8253X3Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   _forcedConditionPassesNext = 0;
 }
 
+void Uc8253X3Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMode mode, RefreshMode fallback,
+                                   bool turnOff) {
+  if (mode == GrayscaleMode::Direct && _cfg.directGray) {
+    // Stage complete planes before the only display activation. No B/W image is
+    // shown.
+    _absoluteInput = true;
+    _directGrayPass = true;
+    _grayState = {};
+    _redRamSynced = false;
+    _inGrayscaleMode = false;
+    bus.cmdData2(CMD_PANEL_SETTING, 0x3F, 0x0A);
+    return;
+  }
+  displayGrayscaleBase(bus, fb, fallback, turnOff);
+  _absoluteInput = mode == GrayscaleMode::Absolute;
+}
+
 void Uc8253X3Driver::startGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) {
   finishGrayscaleBase(bus, fb);
   finishGray(bus, fb);
+  _absoluteInput = false;
+  _directGrayPass = false;
   // OEM V5.6.33 grayscale base update: write the new frame to DTM2 and fire
   // the "AA-pre-BW(mid)" bank as a differential refresh against the old frame
   // still held in DTM1. Changed pixels get the strong 0xAA/0x55 transition
@@ -329,16 +389,28 @@ void Uc8253X3Driver::startGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshM
   // settle flavor of the same bank (DTM1 == DTM2 after display()'s post-
   // refresh sync, so only the gentle WW/BB cells fire).
   if (_inGrayscaleMode) {
+    // grayscaleRevert scrubs the panel to white and leaves BOTH DTM planes
+    // all-white with _redRamSynced set, so DTM1 matches the displayed state
+    // and the differential below is valid by construction (white-baseline,
+    // the same pattern the full sync uses).
     grayscaleRevert(bus, fb);
   }
+  // _grayState.lsbValid means grayscale planes were written over DTM1/DTM2
+  // since the last display — the controller RAM no longer holds the displayed
+  // BW frame even though _redRamSynced may still read true, so the
+  // differential would mis-drive; take the clean fallback path instead.
   const bool cleanBaseNeeded =
       !_redRamSynced || _grayState.lsbValid || _forceFullSyncNext || _initialFullSyncsRemaining > 0;
   if (cleanBaseNeeded) {
     display(bus, fb, nullptr, fallback, /*turnOff=*/false);
     loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
+    // display() already left DTM1 matching the frame. The settle refresh does
+    // not need another copy; overlap callers write the LSB plane next.
+    _grayBaseSyncDtm1 = false;
   } else {
     bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
     loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
+    _grayBaseSyncDtm1 = true;
   }
   fireDrf(bus);
   _pendingGrayTurnOff = turnOff;
@@ -347,18 +419,19 @@ void Uc8253X3Driver::startGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshM
 
 void Uc8253X3Driver::finishGrayscaleBase(EpdBus& bus, const uint8_t* fb) {
   (void)fb;
-  if (!_pendingGrayBase) {
-    return;
-  }
+  if (!_pendingGrayBase) return;
   _pendingGrayBase = false;
-  waitDrf(bus, _pendingGrayTurnOff);
+  waitDrf(bus, _pendingGrayTurnOff, " X3_DRF");
 }
 
 void Uc8253X3Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) {
   startGrayscaleBase(bus, fb, fallback, turnOff);
   finishGrayscaleBase(bus, fb);
-  // Blocking callers still get DTM1 = displayed ink. Overlap callers skip this
-  // and write the LSB plane next (which overwrites DTM1 anyway).
+  if (!_grayBaseSyncDtm1) return;
+  _grayBaseSyncDtm1 = false;
+  // Keep the driver invariant that DTM1 mirrors the displayed frame; the gray
+  // plane writes that normally follow overwrite both planes anyway. Overlap
+  // callers use start/finish and skip this — their LSB write replaces DTM1.
   bus.sendPlaneFlipped(CMD_DTM1, fb, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
   _redRamSynced = true;
@@ -404,6 +477,10 @@ void Uc8253X3Driver::preconditionGrayscale(EpdBus& bus, uint16_t x, uint16_t y, 
 }
 
 void Uc8253X3Driver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
+  if (_directGrayPass) {
+    writeGrayscalePlaneStrip(bus, GrayPlane::Lsb, lsb, 0, _h);
+    return;
+  }
   if (!lsb) {
     _grayState.lsbValid = false;
     return;
@@ -413,9 +490,14 @@ void Uc8253X3Driver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
   _grayState.lsbValid = true;
 }
 
-void Uc8253X3Driver::copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) {
-  if (!msb || !_grayState.lsbValid) return;
-  bus.sendPlaneFlipped(CMD_DTM2, msb, _h, _wb);  // MSB plane -> "new" RAM
+void Uc8253X3Driver::copyGrayscaleMsb(EpdBus &bus, const uint8_t *msb) {
+  if (!msb || !_grayState.lsbValid)
+    return;
+  if (_directGrayPass) {
+    writeGrayscalePlaneStrip(bus, GrayPlane::Msb, msb, 0, _h);
+    return;
+  }
+  bus.sendPlaneFlipped(CMD_DTM2, msb, _h, _wb); // MSB plane -> "new" RAM
   bus.cmd(CMD_DATA_STOP);
 }
 
@@ -451,55 +533,91 @@ void Uc8253X3Driver::writeGrayscalePlaneStrip(EpdBus& bus, GrayPlane plane, cons
   if (plane == GrayPlane::Lsb) _grayState.lsbValid = true;
 }
 
-void Uc8253X3Driver::startGray(EpdBus& bus, const uint8_t* fb, bool turnOff) {
+void Uc8253X3Driver::startGray(EpdBus& bus, const uint8_t* fb, bool turnOff, bool factoryMode) {
   (void)fb;
   finishGrayscaleBase(bus, fb);
   finishGray(bus, fb);
-  if (!_grayState.lsbValid) {
+  if (!_grayState.lsbValid) return;
+
+  if (_directGrayPass) {
+    bus.cmdData2(CMD_VCOM_DATA_INTERVAL, 0xA9, 0x07);
+    const auto& bank = *_cfg.directGray;
+    loadBank(bus, bank);
+    // Strip uploads leave the last band selected; refresh the entire visible
+    // panel. Direct stays blocking: the partial window has to close after DRF.
+    grayWindowIn(bus);
+    triggerRefresh(bus, turnOff, " X3_DIRECT_GRAY_DRF");
+    bus.cmd(CMD_PARTIAL_OUT);
+    _directGrayOnPanel = true;
+    _absoluteInput = false;
+    _directGrayPass = false;
+    _grayState = {};
+    _redRamSynced = false;
+    _inGrayscaleMode = false;
+    _initialFullSyncsRemaining = 0;
+    _forceFullSyncNext = false;
+    _forcedConditionPassesNext = 0;
     return;
   }
-  _inGrayscaleMode = true;
-  loadBankCdi(bus, 0x29, 0x07, _cfg.gc);
+
+  // Differential grayscale leaves the gray bank loaded, so the next BW turn must
+  // revert first; factory absolute mode self-cleans.
+  _inGrayscaleMode = _absoluteInput || !factoryMode;
+  if (_absoluteInput) {
+    // (DTM1, DTM2): 00 black, 10 dark, 01 light, 11 white. The B/W base
+    // already supplies the endpoints. Retain the two calibrated gray drives
+    // and idle both endpoints; no mask conversion or extra framebuffer is needed.
+    const Uc8253LutBank absoluteGc = {_cfg.gc.vcom, _cfg.gc.bb, _cfg.gc.bw, _cfg.gc.ww, _cfg.gc.bb};
+    loadBankCdi(bus, 0x29, 0x07, absoluteGc);
+  } else if (factoryMode) {
+    // Legacy factory calls retain their B/W bank; typed direct passes return above.
+    loadBankCdi(bus, 0x29, 0x07, _cfg.full);
+  } else {
+    loadBankCdi(bus, 0x29, 0x07, _cfg.gc);  // OEM 4-level nudge bank
+  }
   fireDrf(bus);
+
   _redRamSynced = false;
   _forceFullSyncNext = false;
   _forcedConditionPassesNext = 0;
   _grayState.lsbValid = false;
+  _absoluteInput = false;
+  _directGrayPass = false;
   _pendingGrayTurnOff = turnOff;
   _pendingGray = true;
 }
 
 void Uc8253X3Driver::finishGray(EpdBus& bus, const uint8_t* fb) {
   (void)fb;
-  if (!_pendingGray) {
-    return;
-  }
+  if (!_pendingGray) return;
   _pendingGray = false;
-  waitDrf(bus, _pendingGrayTurnOff);
+  waitDrf(bus, _pendingGrayTurnOff, " X3_DRF");
 }
 
 void Uc8253X3Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, const unsigned char* lut,
                                  bool factoryMode) {
   (void)lut;
-  if (factoryMode) {
-    if (!_grayState.lsbValid) {
-      return;
-    }
-    _inGrayscaleMode = false;
-    loadBankCdi(bus, 0x29, 0x07, _cfg.full);
-    triggerRefresh(bus, turnOff);
-    _redRamSynced = false;
-    _forceFullSyncNext = false;
-    _forcedConditionPassesNext = 0;
-    _grayState.lsbValid = false;
-    return;
-  }
-  startGray(bus, fb, turnOff);
+  startGray(bus, fb, turnOff, factoryMode);
   finishGray(bus, fb);
 }
 
 void Uc8253X3Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
-  if (!bw) return;
+  if (_directGrayPass || _directGrayOnPanel) {
+    _absoluteInput = false;
+    _directGrayPass = false;
+    _grayState = {};
+    // A B/W shadow cannot describe the physical gray page for a differential
+    // update.
+    _redRamSynced = false;
+    return;
+  }
+  _absoluteInput = false;
+  _directGrayPass = false;
+  if (!bw) {
+    _grayState.lsbValid = false;
+    _redRamSynced = false;
+    return;
+  }
   // Rebase both planes from the restored BW buffer (same data to DTM1 + DTM2).
   bus.sendPlaneFlipped(CMD_DTM2, bw, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
@@ -534,6 +652,9 @@ void Uc8253X3Driver::grayscaleRevert(EpdBus& bus, const uint8_t* fb) {
 }
 
 void Uc8253X3Driver::requestResync(uint8_t settlePasses) {
+  _grayState = {};
+  _absoluteInput = false;
+  _directGrayPass = false;
   _forceFullSyncNext = true;
   _forcedConditionPassesNext = settlePasses;
 }
@@ -544,6 +665,9 @@ void Uc8253X3Driver::skipInitialResync() {
 }
 
 void Uc8253X3Driver::deepSleep(EpdBus& bus) {
+  _grayState = {};
+  _absoluteInput = false;
+  _directGrayPass = false;
   if (_isScreenOn) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" X3 power-down");

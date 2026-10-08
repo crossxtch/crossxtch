@@ -162,8 +162,8 @@ void loop() {
   if (power::maybeToggleTiltLock(gpio)) {
     return;
   }
-  const uint8_t tiltMode = power::tiltLocked() ? CrossPointTiltPageTurn::TILT_OFF : settings.tiltPageTurn;
-  halTiltSensor.update(tiltMode, CrossPointOrientation::PORTRAIT, screenManager.isReader());
+  const bool tiltOn = settings.tiltPageTurn != 0 && !power::tiltLocked();
+  halTiltSensor.update(tiltOn, screenManager.isReader());
   screenManager.loop();
   power::idleDelay();
 }

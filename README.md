@@ -16,7 +16,7 @@ src/main.cpp          boot + loop
 src/core/             screen stack, input, settings, power, list UI
 src/screens/          home, browser, reader, chapters, settings, update
 src/platform/         chip workarounds
-lib/hal               hardware wrappers (still CrossPoint-shaped)
+lib/hal               hardware wrappers
 lib/Gfx               portrait framebuffer + UI text
 lib/Xtch              XTCH container + page blit
 lib/EpdFont           Ubuntu UI fonts

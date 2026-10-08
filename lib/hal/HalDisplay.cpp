@@ -1,31 +1,17 @@
 #include <HalDisplay.h>
 #include <HalGPIO.h>
 
-// Global HalDisplay instance
 HalDisplay display;
-
-#define SD_SPI_MISO 7
 
 HalDisplay::HalDisplay() : einkDisplay(EPD_SCLK, EPD_MOSI, EPD_CS, EPD_DC, EPD_RST, EPD_BUSY) {}
 
-HalDisplay::~HalDisplay() {}
-
-void HalDisplay::begin(bool seamless) {
-  // Set X3-specific panel mode before initializing.
+void HalDisplay::begin() {
   if (gpio.deviceIsX3()) {
     einkDisplay.setDisplayX3();
   }
-
   einkDisplay.begin();
 
-  if (seamless) {
-    // Defuse the SDK's X3 _x3InitialFullSyncsRemaining counter (no-op on X4)
-    // so the first paint isn't promoted to FULL (~770ms). Skips the wakeup-
-    // gated requestResync() below for the same reason.
-    einkDisplay.skipInitialResync();
-    return;
-  }
-  // Request resync after specific wakeup events to ensure clean display state.
+  // Resync after a wake that did not leave the panel showing this framebuffer.
   const auto wakeupReason = gpio.getWakeupReason();
   if (wakeupReason == HalGPIO::WakeupReason::PowerButton || wakeupReason == HalGPIO::WakeupReason::AfterFlash ||
       wakeupReason == HalGPIO::WakeupReason::Other) {
@@ -35,17 +21,7 @@ void HalDisplay::begin(bool seamless) {
 
 void HalDisplay::clearScreen(uint8_t color) const { einkDisplay.clearScreen(color); }
 
-void HalDisplay::drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                           bool fromProgmem) const {
-  einkDisplay.drawImage(imageData, x, y, w, h, fromProgmem);
-}
-
-void HalDisplay::drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                                      bool fromProgmem) const {
-  einkDisplay.drawImageTransparent(imageData, x, y, w, h, fromProgmem);
-}
-
-EInkDisplay::RefreshMode convertRefreshMode(HalDisplay::RefreshMode mode) {
+static EInkDisplay::RefreshMode convertRefreshMode(HalDisplay::RefreshMode mode) {
   switch (mode) {
     case HalDisplay::FULL_REFRESH:
       return EInkDisplay::FULL_REFRESH;
@@ -64,51 +40,22 @@ void HalDisplay::displayBuffer(HalDisplay::RefreshMode mode, bool turnOffScreen)
   einkDisplay.displayBuffer(convertRefreshMode(mode), turnOffScreen);
 }
 
-void HalDisplay::displayBufferAsync(HalDisplay::RefreshMode mode) {
-  einkDisplay.displayBufferAsyncNoShadow(convertRefreshMode(mode));
-}
-
-void HalDisplay::waitRefreshComplete() { einkDisplay.waitRefreshComplete(); }
-
-bool HalDisplay::supportsAsyncRefresh() const { return einkDisplay.supportsAsyncRefresh(); }
-
 void HalDisplay::setBusyWaitSliceHook(bool (*sliceHook)(int8_t busyPin, uint8_t busyLevel)) {
   einkDisplay.setBusyWaitSliceHook(sliceHook);
 }
 
-void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {
-  einkDisplay.refreshDisplay(convertRefreshMode(mode), turnOffScreen);
-}
-
 void HalDisplay::setInverted(bool inverted) { einkDisplay.setInverted(inverted); }
-
-bool HalDisplay::toggleInverted() { return einkDisplay.toggleInverted(); }
-
-bool HalDisplay::isInverted() const { return einkDisplay.isInverted(); }
 
 void HalDisplay::deepSleep() { einkDisplay.deepSleep(); }
 
 uint8_t* HalDisplay::getFrameBuffer() const { return einkDisplay.getFrameBuffer(); }
 
-uint8_t* HalDisplay::lendFrameBufferStorage(uint32_t* sizeOut) { return einkDisplay.lendBuildStorage(sizeOut); }
-
-void HalDisplay::returnFrameBufferStorage() { einkDisplay.returnBuildStorage(); }
-
-void HalDisplay::copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer) {
-  einkDisplay.copyGrayscaleBuffers(lsbBuffer, msbBuffer);
-}
-
 void HalDisplay::displayGrayscaleBase(RefreshMode fallback, bool turnOffScreen) {
-  // X3: a HALF fallback means the caller wants a clean base (e.g. the sleep
-  // cover, a full-screen swap from arbitrary prior content). Without this, the
-  // grayscale base takes its gentle differential path and the prior frame ghosts
-  // through the soft aa_pre_bw_mid waveform. BW HALF does not need this: that
-  // path uses the scrub bank. The reader's FAST path stays differential so
-  // per-page grayscale stays cheap.
+  // X3 HALF wants a clean base. Without the resync, the gentle differential
+  // waveform ghosts the previous frame. The reader's FAST path stays differential.
   if (gpio.deviceIsX3() && fallback == RefreshMode::HALF_REFRESH) {
     einkDisplay.requestResync(1);
   }
-
   einkDisplay.displayGrayscaleBase(convertRefreshMode(fallback), turnOffScreen);
 }
 
@@ -123,10 +70,6 @@ void HalDisplay::finishGrayscaleBase() { einkDisplay.finishGrayscaleBase(); }
 
 void HalDisplay::preconditionGrayscale() { einkDisplay.preconditionGrayscale(); }
 
-void HalDisplay::preconditionGrayscale(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
-  einkDisplay.preconditionGrayscale(x, y, w, h);
-}
-
 void HalDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer) { einkDisplay.copyGrayscaleLsbBuffers(lsbBuffer); }
 
 void HalDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) { einkDisplay.copyGrayscaleMsbBuffers(msbBuffer); }
@@ -139,13 +82,6 @@ void HalDisplay::startGrayBuffer(bool turnOffScreen) { einkDisplay.startGrayBuff
 
 void HalDisplay::finishGrayBuffer() { einkDisplay.finishGrayBuffer(); }
 
-void HalDisplay::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, uint16_t yStart, uint16_t numRows) {
-  einkDisplay.writeGrayscalePlaneStrip(lsbPlane ? EInkDisplay::GRAY_PLANE_LSB : EInkDisplay::GRAY_PLANE_MSB, rows,
-                                       yStart, numRows);
-}
-
-bool HalDisplay::supportsStripGrayscale() const { return einkDisplay.supportsStripGrayscale(); }
-
 bool HalDisplay::combinesGrayscaleBase() const { return einkDisplay.combinesGrayscaleBase(); }
 
 uint16_t HalDisplay::getDisplayWidth() const { return einkDisplay.getDisplayWidth(); }
@@ -153,5 +89,3 @@ uint16_t HalDisplay::getDisplayWidth() const { return einkDisplay.getDisplayWidt
 uint16_t HalDisplay::getDisplayHeight() const { return einkDisplay.getDisplayHeight(); }
 
 uint16_t HalDisplay::getDisplayWidthBytes() const { return einkDisplay.getDisplayWidthBytes(); }
-
-uint32_t HalDisplay::getBufferSize() const { return einkDisplay.getBufferSize(); }

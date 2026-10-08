@@ -1,9 +1,7 @@
 #include "SettingsScreen.h"
 
 #include <Gfx.h>
-#include <HalClock.h>
 #include <HalDisplay.h>
-#include <HalPowerManager.h>
 #include <HalTiltSensor.h>
 #include <Logging.h>
 
@@ -120,9 +118,7 @@ void SettingsScreen::loop() {
     finish();
     return;
   }
-  uint8_t hour = 0;
-  uint8_t minute = 0;
-  if (halClock.getLocalTime(hour, minute, settings.clockUtcOffsetQ) && minute != shownMinute) {
+  if (ui::statusMinuteChanged(shownMinute)) {
     requestUpdate();
   }
   if (ui::applyDelta(index, input.consumeNavigationDelta(), itemCount())) {
@@ -166,19 +162,7 @@ void SettingsScreen::loop() {
 
 void SettingsScreen::render() {
   gfx.clear(false);
-
-  char clock[8];
-  uint8_t hour = 0;
-  uint8_t minute = 0;
-  if (halClock.getLocalTime(hour, minute, settings.clockUtcOffsetQ)) {
-    snprintf(clock, sizeof(clock), "%02u:%02u", hour, minute);
-    gfx.drawCenteredText(FONT_UI_BOLD, 8, clock);
-    shownMinute = minute;
-  }
-
-  char bat[16];
-  snprintf(bat, sizeof(bat), "%u%%", static_cast<unsigned>(powerManager.getBatteryPercentage()));
-  gfx.drawText(FONT_UI, gfx.width() - gfx.textWidth(FONT_UI, bat) - 12, 8, bat);
+  ui::drawStatusBar(gfx, shownMinute);
 
   char lang[48];
   char deep[48];
