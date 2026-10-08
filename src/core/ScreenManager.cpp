@@ -86,7 +86,11 @@ void ScreenManager::loop() {
   applyPending();
   if (dirty && current) {
     HalPowerManager::Lock powerLock;
+    const uint32_t t0 = millis();
     current->render();
+    // Includes drawing and the panel refresh. Subtract the PERF panel/base/gray
+    // lines printed inside render() to see CPU time alone.
+    LOG_INF("PERF", "ui %s %lums", current->name, static_cast<unsigned long>(millis() - t0));
     dirty = false;
   }
 }

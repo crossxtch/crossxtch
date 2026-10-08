@@ -392,10 +392,12 @@ bool XtchBook::pageInfo(const uint32_t pageIndex, xtch::PageInfo& info) { return
 
 xtch::Error XtchBook::loadPageData(const uint32_t pageIndex) {
   loadedPageIndex = 0xFFFFFFFFu;
+  const uint32_t tTable = millis();
   xtch::PageInfo page{};
   if (!readPageTableEntry(pageIndex, page)) {
     return xtch::Error::PageOutOfRange;
   }
+  const uint32_t tableMs = millis() - tTable;
   if (!ensureOpen()) {
     return xtch::Error::FileNotFound;
   }
@@ -423,9 +425,12 @@ xtch::Error XtchBook::loadPageData(const uint32_t pageIndex) {
     return xtch::Error::OutOfMemory;
   }
 
+  const uint32_t tSeek = millis();
+  bool clusterHit = false;
   const uint32_t cachedCluster = clusterLruLookup(pageIndex);
   if (cachedCluster != 0) {
     file.setPos(page.offset, cachedCluster);
+    clusterHit = true;
   } else if (!file.seek64(page.offset)) {
     LOG_ERR("XTCH", "Seek page %lu offset %llu failed", static_cast<unsigned long>(pageIndex),
             static_cast<unsigned long long>(page.offset));
@@ -437,6 +442,7 @@ xtch::Error XtchBook::loadPageData(const uint32_t pageIndex) {
       clusterLruRemember(pageIndex, cluster);
     }
   }
+  const uint32_t seekMs = millis() - tSeek;
 
   // Read the 22-byte page header first so uncompressed pages can stream the
   // body straight into pageBuffer. Compressed pages inflate through a 4 KB
@@ -461,6 +467,8 @@ xtch::Error XtchBook::loadPageData(const uint32_t pageIndex) {
 
   memcpy(pageBuffer, &pageHeader, sizeof(pageHeader));
   uint8_t* decodedBody = pageBuffer + sizeof(xtch::PageHeader);
+  const uint32_t hdrMs = millis() - tSeek - seekMs;
+  const uint32_t tBody = millis();
 
   if (pageHeader.compression == 0) {
     // Raw bitplanes stored as-is: body length must match the decoded size exactly.
@@ -502,6 +510,11 @@ xtch::Error XtchBook::loadPageData(const uint32_t pageIndex) {
   }
 
   loadedPageIndex = pageIndex;
+  LOG_INF("PERF", "load p=%lu comp=%u cluster=%d table=%lums seek=%lums hdr=%lums body=%lums disk=%lu dec=%lu",
+          static_cast<unsigned long>(pageIndex + 1), pageHeader.compression, clusterHit ? 1 : 0,
+          static_cast<unsigned long>(tableMs), static_cast<unsigned long>(seekMs), static_cast<unsigned long>(hdrMs),
+          static_cast<unsigned long>(millis() - tBody), static_cast<unsigned long>(totalOnDisk),
+          static_cast<unsigned long>(totalDecoded));
   return xtch::Error::Ok;
 }
 
@@ -637,7 +650,6 @@ void blitFullFrame(uint8_t* fb, const uint8_t* plane1, const uint8_t* plane2, co
 }  // namespace
 
 bool XtchBook::drawPage(Gfx& gfx, const uint32_t pageIndex, int& pagesUntilFullRefresh, const int refreshFrequency) {
-  const uint32_t tStart = millis();
   if (!opened) {
     LOG_ERR("XTCH", "drawPage but book is closed");
     error = xtch::Error::FileNotFound;
@@ -672,22 +684,18 @@ bool XtchBook::drawPage(Gfx& gfx, const uint32_t pageIndex, int& pagesUntilFullR
   const size_t planeSize = colBytes * static_cast<size_t>(pageWidth);
   const bool prefetched = loadedPageIndex == pageIndex && pageBuffer != nullptr;
 
+  // A prior page's cleanup may still be pending; the new page's own display
+  // calls need the DTM banks already resynced, so flush before touching fb.
+  // Its PERF cleanup line is not part of this page's total.
+  flushPendingCleanup(gfx);
+  const uint32_t tPage = millis();
+
   if (!prefetched) {
     const xtch::Error loadErr = loadPageData(pageIndex);
     if (loadErr != xtch::Error::Ok) {
       return fail(loadErr);
     }
   }
-
-  const uint32_t tLoaded = millis();
-  const size_t bytesHeld = sizeof(xtch::PageHeader) + planeSize * 2;
-  LOG_DBG("XTCH", "Page %lu: %s took %lums (%lu bytes, heap=%u)", static_cast<unsigned long>(pageIndex),
-          prefetched ? "prefetch hit" : "SD load", static_cast<unsigned long>(tLoaded - tStart),
-          static_cast<unsigned long>(bytesHeld), static_cast<unsigned>(ESP.getFreeHeap()));
-
-  // A prior page's cleanup may still be pending; the new page's own display
-  // calls need the DTM banks already resynced, so flush before touching fb.
-  flushPendingCleanup(gfx);
 
   const uint8_t* plane1 = pageBuffer + sizeof(xtch::PageHeader);
   const uint8_t* plane2 = plane1 + planeSize;
@@ -720,12 +728,24 @@ bool XtchBook::drawPage(Gfx& gfx, const uint32_t pageIndex, int& pagesUntilFullR
     }
   };
 
-  paint(PlaneOp::Ink);
+  auto cpuMs = [](auto&& fn) {
+    const uint32_t t0 = millis();
+    fn();
+    return static_cast<unsigned long>(millis() - t0);
+  };
 
-  const uint32_t tPass1Decoded = millis();
+  const unsigned long inkMs = cpuMs([&] { paint(PlaneOp::Ink); });
 
+  const char* mode = "fast";
+  // UC8253 returns from start once BUSY is low and waits in finish. The
+  // blocking base rewrites DTM1 after that wait; the LSB copy replaces it, so
+  // the split skips the extra plane (~45 ms). Other panels block in start and
+  // finish is empty. CPU paint between the two is fine. SPI is not: the
+  // controller is mid-refresh, and this bus is shared with the SD card.
+  bool baseOpen = false;
   if (pagesUntilFullRefresh <= 1) {
     // Clean base before gray planes so ghosting doesn't accumulate.
+    mode = "half";
     if (gfx.combinesGrayscaleBase()) {
       gfx.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
     } else {
@@ -734,48 +754,37 @@ bool XtchBook::drawPage(Gfx& gfx, const uint32_t pageIndex, int& pagesUntilFullR
     }
     pagesUntilFullRefresh = refreshFrequency;
   } else {
-    gfx.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+    gfx.startGrayscaleBase(HalDisplay::FAST_REFRESH);
+    baseOpen = true;
     --pagesUntilFullRefresh;
   }
 
-  const uint32_t tBwDisplayed = millis();
-
-  paint(PlaneOp::Lsb);
+  const unsigned long lsbMs = cpuMs([&] { paint(PlaneOp::Lsb); });
+  if (baseOpen) {
+    gfx.finishGrayscaleBase();
+  }
   gfx.copyGrayscaleLsbBuffers();
 
-  const uint32_t tLsbCopied = millis();
-
-  paint(PlaneOp::Msb);
+  const unsigned long msbMs = cpuMs([&] { paint(PlaneOp::Msb); });
   gfx.copyGrayscaleMsbBuffers();
 
-  const uint32_t tMsbCopied = millis();
-
-  // DRF then wait immediately. Inserting work between them (even the 5 ms Ink
-  // blit) missed the busy pulse and waitBusy sat idle-HIGH until a later
-  // ~223 ms period. SD between DRF and wait is worse: shared SPI aborts gray.
-  gfx.displayGrayBuffer();
-  const uint32_t tGrayDisplayed = millis();
-
-  paint(PlaneOp::Ink);
-  const uint32_t tInkRebuilt = millis();
+  gfx.startGrayBuffer();
+  const unsigned long rebuildMs = cpuMs([&] { paint(PlaneOp::Ink); });
+  gfx.finishGrayBuffer();
 
   // Deferred: run on the next idle tick (flushPendingCleanup) instead of here,
-  // so its ~48ms of SPI housekeeping doesn't block the page the user is
-  // waiting on. drawPage() itself flushes it defensively before the next page.
+  // so its SPI housekeeping doesn't block the page the user is waiting on.
+  // drawPage() itself flushes it defensively before the next page.
   cleanupPending = true;
-  const uint32_t tCleanup = tInkRebuilt;
 
   error = xtch::Error::Ok;
 
-  LOG_DBG("XTCH",
-          "Rendered page %lu/%u: load=%lums pass1Decode=%lums bwDisplay=%lums lsbDecode+copy=%lums "
-          "msbDecode+copy=%lums grayDisplay=%lums inkRebuild=%lums cleanup(deferred)=%lums total=%lums",
-          static_cast<unsigned long>(pageIndex + 1), header.pageCount,
-          static_cast<unsigned long>(tLoaded - tStart), static_cast<unsigned long>(tPass1Decoded - tLoaded),
-          static_cast<unsigned long>(tBwDisplayed - tPass1Decoded), static_cast<unsigned long>(tLsbCopied - tBwDisplayed),
-          static_cast<unsigned long>(tMsbCopied - tLsbCopied), static_cast<unsigned long>(tGrayDisplayed - tMsbCopied),
-          static_cast<unsigned long>(tInkRebuilt - tGrayDisplayed), static_cast<unsigned long>(tCleanup - tInkRebuilt),
-          static_cast<unsigned long>(tCleanup - tStart));
+  // ink/lsb/msb/rebuild are CPU paint only. Panel and SPI times are the PERF
+  // lines printed by those calls (base, panel, precondition, spi-*, gray).
+  LOG_INF("PERF", "page %lu/%u %s hit=%d full=%d mhz=%u ink=%lums lsb=%lums msb=%lums rebuild=%lums total=%lums",
+          static_cast<unsigned long>(pageIndex + 1), header.pageCount, mode, prefetched ? 1 : 0, fullFrame ? 1 : 0,
+          static_cast<unsigned>(getCpuFrequencyMhz()), inkMs, lsbMs, msbMs, rebuildMs,
+          static_cast<unsigned long>(millis() - tPage));
   return true;
 }
 
@@ -794,13 +803,9 @@ void XtchBook::prefetchForward(const uint32_t fromPageIndex) {
   if (loadedPageIndex == fromPageIndex + 1 && pageBuffer != nullptr) {
     return;
   }
-  const uint32_t t0 = millis();
   const xtch::Error err = loadPageData(fromPageIndex + 1);
   if (err != xtch::Error::Ok) {
     LOG_DBG("XTCH", "Prefetch page %lu failed: %s", static_cast<unsigned long>(fromPageIndex + 1),
             xtch::errorName(err));
-    return;
   }
-  LOG_DBG("XTCH", "Prefetch page %lu %lums", static_cast<unsigned long>(fromPageIndex + 2),
-          static_cast<unsigned long>(millis() - t0));
 }

@@ -1,6 +1,7 @@
 #include "ReaderScreen.h"
 
 #include <Gfx.h>
+#include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -101,10 +102,16 @@ void ReaderScreen::loop() {
     return;
   }
 
-  // Opportunistic: finish any deferred post-page-render RAM cleanup here,
-  // before checking input, so it lands in idle time rather than the next
-  // page's blocking render.
-  xtch.flushPendingCleanup(gfx);
+  // Two full-frame SPI copies. Deferred so it is not inside the page the user
+  // just waited on, but a tap queued during that refresh is handled below, so
+  // this still sits on the next turn. At the 10 MHz idle clock the CPU cannot
+  // fill the SPI FIFO and the same copies take ~800 ms instead of ~90 ms.
+  // Lock only when there is work: the lock forces 160 MHz, and taking it on
+  // every idle tick fights idleDelay and toggles the clock every 50 ms.
+  if (xtch.pendingCleanup()) {
+    HalPowerManager::Lock powerLock;
+    xtch.flushPendingCleanup(gfx);
+  }
 
   if (input.wasReleased(MappedInput::Button::Back)) {
     finish();
@@ -175,15 +182,12 @@ void ReaderScreen::render() {
     return;
   }
 
-  const unsigned long blitStart = millis();
   const bool painted = xtch.drawPage(gfx, page, pagesUntilFull, settings.refreshEveryNPages);
   if (!painted) {
     LOG_ERR("RDR", "Blit page %lu failed: %s", static_cast<unsigned long>(page), xtch::errorName(xtch.lastError()));
     showStatus(uiText::error(xtch::errorName(xtch.lastError())));
     return;
   }
-  const unsigned long blitMs = millis() - blitStart;
-  LOG_DBG("RDR", "Blit page %lu/%u %lums", static_cast<unsigned long>(page + 1), xtch.pageCount(), blitMs);
   if (power::tiltLocked()) {
     power::paintGyroOffMarker();
   }

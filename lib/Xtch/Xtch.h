@@ -55,8 +55,9 @@ class XtchBook {
 
   // Runs the deferred post-gray-refresh RAM cleanup if drawPage() left one
   // pending. No-op otherwise. Call opportunistically on idle ticks so the
-  // ~48ms SPI housekeeping happens before the user's next page turn instead
-  // of blocking the page that just rendered.
+  // SPI housekeeping happens before the user's next page turn instead of
+  // blocking the page that just rendered.
+  bool pendingCleanup() const { return cleanupPending; }
   void flushPendingCleanup(Gfx& gfx);
 
  private:
