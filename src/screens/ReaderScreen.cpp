@@ -87,7 +87,9 @@ bool ReaderScreen::tryOpen() {
 
 void ReaderScreen::onEnter() {
   Screen::onEnter();
-  pagesUntilFull = settings.refreshEveryNPages;
+  // The panel still shows the previous UI, or is clear after boot. A fast page
+  // over that ghosts. Same half page as returning from the chapter list.
+  pagesUntilFull = 1;
   tryOpen();
   requestUpdate();
 }
